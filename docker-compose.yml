@@ -1,0 +1,12 @@
+version: "3"
+services:
+  bluetemp:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+
+    # Below are required for DBus
+    privileged: true
+    volumes:
+      - /var/run/dbus:/var/run/dbus
+      - /etc/zabbix/zabbix_agentd.conf:/etc/zabbix/zabbix_agentd.conf:ro
