@@ -1,11 +1,15 @@
+#!/usr/bin/env python3
+
 import asyncio
 import logging
-import struct
 import sys
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
+from pyzabbix import ZabbixMetric, ZabbixSender
+
+from sensor_data import SensorData
 
 logger = logging.getLogger(__name__)
 
@@ -13,59 +17,44 @@ ATC_MAC_PREFIX = "A4:C1:38"
 ENV_SERVICE = "0000181a-0000-1000-8000-00805f9b34fb"
 
 
-class SensorData(object):
-    temperature: float = 0.0
-    humidity: float = 0.0
-    battery_mv: int = 0
-    battery_pct: int = 0
-
-    def __init__(self, temperature, humidity, battery_mv, battery_pct):
-        self.temperature = temperature
-        self.humidity = humidity
-        self.battery_mv = battery_mv
-        self.battery_pct = battery_pct
-
-    @classmethod
-    def from_custom_format(cls, sensordata: bytes):
-        (temp_01, hum_01, batt_mv, batt_pct, counter, flags) = struct.unpack(
-            "hHHBBB", sensordata
-        )
-        temp = temp_01 / 100
-        hum = hum_01 / 100
-        return cls(temp, hum, batt_mv, batt_pct)
-
-    @classmethod
-    def from_atc1441_format(cls, sensordata: bytes):
-        (temp, hum, batt_pct, batt_mv, counter) = struct.unpack("hBBHB", sensordata)
-        return cls(temp, hum, batt_mv, batt_pct)
+def send_data_to_zabbix(data: SensorData, sensorname: str):
+    packet = [
+        ZabbixMetric("Environment", f"temperature[{sensorname}]", data.temperature),
+        ZabbixMetric("Environment", f"humidity[{sensorname}]", data.humidity),
+        ZabbixMetric("Environment", f"battery[{sensorname}]", data.battery_pct),
+    ]
+    result = ZabbixSender(use_config=True).send(packet)
+    logger.debug(result)
 
 
-def simple_callback(device: BLEDevice, advertisement_data: AdvertisementData):
+def ble_advertisement_cb(device: BLEDevice, ad_data: AdvertisementData):
     if (
         device.address.startswith(ATC_MAC_PREFIX)
-        and ENV_SERVICE in advertisement_data.service_data
+        and ENV_SERVICE in ad_data.service_data
     ):
-        raw_data = advertisement_data.service_data[ENV_SERVICE]
+        raw_data = ad_data.service_data[ENV_SERVICE]
         if len(raw_data) == 15:
             data = SensorData.from_custom_format(raw_data[6:])
         elif len(raw_data) == 13:
             data = SensorData.from_atc1441_format(raw_data[6:])
         else:
-            logger.warning(
-                f"Unexpected data format: {hex(advertisement_data.service_data)}"
-            )
+            logger.warning(f"Unexpected data format: {hex(ad_data.service_data)}")
             return
         display_name = device.name if device.name else device.address
         logger.info(
             f"{display_name}@{device.rssi} dBM: {data.temperature:.2f} °C, {data.humidity:.2f}%, {data.battery_mv}mv ({data.battery_pct}%)"
         )
+        try:
+            send_data_to_zabbix(data, display_name)
+        except Exception as e:
+            logger.warning(f"Failure while sending to Zabbix: {str(e)}")
     else:
-        logger.debug(f"CRAP FROM {device.address}: {advertisement_data}")
+        logger.debug(f"Advertisement from {device.address}: {ad_data}")
 
 
 async def main():
     scanner = BleakScanner()
-    scanner.register_detection_callback(simple_callback)
+    scanner.register_detection_callback(ble_advertisement_cb)
 
     while True:
         await scanner.start()
